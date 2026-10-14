@@ -1,0 +1,22 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  dylib:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilar para tvOS arm64
+        run: |
+          SDK=$(xcrun --sdk appletvos --show-sdk-path)
+          xcrun clang -dynamiclib -arch arm64 -isysroot "$SDK" -mtvos-version-min=15.0 \
+            -fobjc-arc -framework UIKit -framework Foundation \
+            -install_name @rpath/StremioFocusDiag.dylib \
+            -o StremioFocusDiag.dylib StremioFocusDiag.m
+          file StremioFocusDiag.dylib
+          otool -l StremioFocusDiag.dylib | grep -A3 LC_BUILD_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StremioFocusDiag
+          path: StremioFocusDiag.dylib

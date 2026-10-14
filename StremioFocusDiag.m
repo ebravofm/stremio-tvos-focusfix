@@ -93,7 +93,7 @@ static void InstallHUD(void) {
     gHUD.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v6 activo (log en archivo)";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v7 activo (log en archivo)";
     [vc.view addSubview:gHUD];
     gBeat = [[UILabel alloc] initWithFrame:CGRectMake(40, 8, 1840, 28)];
     gBeat.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightBold];
@@ -125,6 +125,14 @@ static void InstallHUD(void) {
                       ++gTick, focus, cv.contentOffset.x, cv.isDragging, cv.isDecelerating,
                       (int)cv.layer.animationKeys.count];
         if (gTick % 4 == 0) FileLog(gBeat.text);
+        if (cv) {
+            static NSString *lastGeo;
+            NSString *g = [NSString stringWithFormat:@"cvf=%@ ins=%@ cs=%.0f sup=%@",
+                           NSStringFromCGRect(cv.frame), NSStringFromUIEdgeInsets(cv.adjustedContentInset),
+                           cv.contentSize.width, NSStringFromCGRect(cv.superview.frame)];
+            if (lastGeo && ![g isEqualToString:lastGeo]) StremioFixLog([NSString stringWithFormat:@"GEO %@", g]);
+            lastGeo = g;
+        }
     }];
     [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
 }
@@ -175,9 +183,10 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
         idx = ip ? [NSString stringWithFormat:@"%ld", (long)ip.item] : @"nil";
         CGRect visible = CGRectMake(cv.contentOffset.x, cv.contentOffset.y, cv.bounds.size.width, cv.bounds.size.height);
         vis = CGRectIntersectsRect(visible, next.frame) ? @"vis" : @"FUERA";
-        geo = [NSString stringWithFormat:@" cs=%.0f fr=%.0f+%.0f bw=%.0f n=%ld %@",
-               cv.contentSize.width, next.frame.origin.x, next.frame.size.width, cv.bounds.size.width,
-               (long)[cv numberOfItemsInSection:0], [NSStringFromClass(cv.collectionViewLayout.class) stringByReplacingOccurrencesOfString:@"Stremio." withString:@""]];
+        geo = [NSString stringWithFormat:@" cs=%.0f fr=%.0f bw=%.0f cvf=%@ ins=%@",
+               cv.contentSize.width, next.frame.origin.x, cv.bounds.size.width,
+               NSStringFromCGRect([cv convertRect:cv.bounds toView:nil]),
+               NSStringFromUIEdgeInsets(cv.adjustedContentInset)];
     }
     StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f%@ m=%.0f",
                    idx, vis, cv.contentOffset.x, geo, FootprintMB()]);

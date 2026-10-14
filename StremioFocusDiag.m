@@ -3,8 +3,13 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <mach/mach.h>
+#import <dlfcn.h>
 
 // 1 = el layout deja de calcular su propio destino de scroll y se usa el del sistema.
+// 1 = corrige a mano el scroll cuando la celda enfocada queda fuera (v3). Apagado para no confundir el diagnostico.
+#ifndef ENABLE_FIX
+#define ENABLE_FIX 0
+#endif
 #ifndef BYPASS_CUSTOM_TARGET
 #define BYPASS_CUSTOM_TARGET 1
 #endif
@@ -88,7 +93,7 @@ static void InstallHUD(void) {
     gHUD.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v5 activo (log en archivo)";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v6 activo (log en archivo)";
     [vc.view addSubview:gHUD];
     gBeat = [[UILabel alloc] initWithFrame:CGRectMake(40, 8, 1840, 28)];
     gBeat.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightBold];
@@ -178,7 +183,7 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
                    idx, vis, cv.contentOffset.x, geo, FootprintMB()]);
 
     // Correccion de prueba: si poco despues la celda enfocada sigue fuera de pantalla, forzar el scroll.
-    if (isCell) {
+    if (ENABLE_FIX && isCell) {
         __weak UICollectionView *wcv = cv;
         __weak UIView *wnext = next;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -208,6 +213,44 @@ static CGPoint HookedTCO(id self, SEL _cmd, CGPoint proposed, CGPoint velocity) 
     return BYPASS_CUSTOM_TARGET ? proposed : orig;
 }
 
+
+// Registra quien mueve contentOffset en sentido contrario o a saltos grandes, con direccion en el binario (Ghidra).
+static NSString *Caller(void) {
+    NSArray<NSNumber *> *ra = NSThread.callStackReturnAddresses;
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSUInteger i = 2; i < ra.count && out.count < 4; i++) {
+        void *a = (void *)ra[i].unsignedLongValue;
+        Dl_info di;
+        if (!dladdr(a, &di)) continue;
+        NSString *img = di.dli_fname ? [[NSString stringWithUTF8String:di.dli_fname] lastPathComponent] : @"?";
+        if ([img isEqualToString:@"Stremio"])
+            [out addObject:[NSString stringWithFormat:@"S:%lx", (unsigned long)((uintptr_t)a - (uintptr_t)di.dli_fbase + 0x100000000UL)]];
+        else if (di.dli_sname)
+            [out addObject:[NSString stringWithFormat:@"%.28s", di.dli_sname]];
+    }
+    return [out componentsJoinedByString:@" < "];
+}
+
+typedef void (*SCOIMP)(id, SEL, CGPoint);
+typedef void (*SCOAIMP)(id, SEL, CGPoint, BOOL);
+static SCOIMP gOrigSCO;
+static SCOAIMP gOrigSCOA;
+static int gLastDir;
+
+static void NoteOffset(UIScrollView *sv, CGPoint req, BOOL anim, BOOL isAnimVariant) {
+    if (sv != (UIScrollView *)gCV) return;
+    CGFloat old = sv.contentOffset.x, d = req.x - old;
+    if (fabs(d) < 1) return;
+    int dir = d > 0 ? 1 : -1;
+    BOOL rev = gLastDir != 0 && dir != gLastDir && fabs(d) > 30;
+    gLastDir = dir;
+    if (rev || fabs(d) > 400 || isAnimVariant)
+        StremioFixLog([NSString stringWithFormat:@"sco%@ %.0f->%.0f %@%@ %@", isAnimVariant ? @"A" : @"",
+                       old, req.x, anim ? @"anim " : @"", rev ? @"REV" : @"", Caller()]);
+}
+static void HookedSCO(id self, SEL _cmd, CGPoint p) { NoteOffset(self, p, NO, NO); gOrigSCO(self, _cmd, p); }
+static void HookedSCOA(id self, SEL _cmd, CGPoint p, BOOL a) { NoteOffset(self, p, a, YES); gOrigSCOA(self, _cmd, p, a); }
+
 static void Install(void) {
     Class c = NSClassFromString(@"_TtC7Stremio25CatalogGridViewController");
     if (!c) { StremioFixLog(@"clase CatalogGridViewController NO encontrada"); return; }
@@ -217,6 +260,10 @@ static void Install(void) {
     Class lay = NSClassFromString(@"_TtC7Stremio24LeadingAlignedFlowLayout");
     Method lm = lay ? class_getInstanceMethod(lay, @selector(targetContentOffsetForProposedContentOffset:withScrollingVelocity:)) : NULL;
     if (lm) gOrigTCO = (TCOIMP)method_setImplementation(lm, (IMP)HookedTCO);
+    Method m1 = class_getInstanceMethod(UIScrollView.class, @selector(setContentOffset:));
+    gOrigSCO = (SCOIMP)method_setImplementation(m1, (IMP)HookedSCO);
+    Method m2 = class_getInstanceMethod(UIScrollView.class, @selector(setContentOffset:animated:));
+    gOrigSCOA = (SCOAIMP)method_setImplementation(m2, (IMP)HookedSCOA);
     StremioFixLog([NSString stringWithFormat:@"hook foco ok, hook layout %@ bypass=%d mem=%.0fMB",
                    lm ? @"ok" : @"NO ENCONTRADO", BYPASS_CUSTOM_TARGET, FootprintMB()]);
 }

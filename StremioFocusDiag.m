@@ -41,12 +41,12 @@ static void InstallHUD(void) {
     UIViewController *vc = [UIViewController new];
     vc.view.backgroundColor = UIColor.clearColor;
     gHUDWin.rootViewController = vc;
-    gHUD = [[UILabel alloc] initWithFrame:CGRectMake(40, 40, 1500, 380)];
+    gHUD = [[UILabel alloc] initWithFrame:CGRectMake(40, 40, 1840, 380)];
     gHUD.numberOfLines = 0;
-    gHUD.font = [UIFont monospacedSystemFontOfSize:20 weight:UIFontWeightRegular];
+    gHUD.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v2 activo";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v3 activo";
     [vc.view addSubview:gHUD];
     gHUDWin.hidden = NO;
 }
@@ -87,19 +87,34 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
     gOrigFocus(self, _cmd, ctx, coord);
     UIView *next = ctx.nextFocusedView;
     UICollectionView *cv = FindCollectionView(next);
-    NSString *idx = @"-", *vis = @"-";
-    if ([next isKindOfClass:UICollectionViewCell.class] && cv) {
+    NSString *idx = @"-", *vis = @"-", *geo = @"";
+    BOOL isCell = [next isKindOfClass:UICollectionViewCell.class] && cv;
+    if (isCell) {
         NSIndexPath *ip = [cv indexPathForCell:(UICollectionViewCell *)next];
         idx = ip ? [NSString stringWithFormat:@"%ld", (long)ip.item] : @"nil";
         CGRect visible = CGRectMake(cv.contentOffset.x, cv.contentOffset.y, cv.bounds.size.width, cv.bounds.size.height);
         vis = CGRectIntersectsRect(visible, next.frame) ? @"vis" : @"FUERA";
+        geo = [NSString stringWithFormat:@" cs=%.0f fr=%.0f+%.0f bw=%.0f n=%ld %@",
+               cv.contentSize.width, next.frame.origin.x, next.frame.size.width, cv.bounds.size.width,
+               (long)[cv numberOfItemsInSection:0], NSStringFromClass(cv.collectionViewLayout.class)];
     }
-    UIViewController *vc = (UIViewController *)self;
-    StremioFixLog([NSString stringWithFormat:@"foco %@ i=%@ %@ off=(%.0f,%.0f) vcwin=%d n=%ld mem=%.0fMB",
-                   next ? NSStringFromClass(next.class) : @"nil", idx, vis,
-                   cv.contentOffset.x, cv.contentOffset.y,
-                   vc.isViewLoaded && vc.view.window != nil,
-                   (long)gHUDWin.windowScene.windows.count, FootprintMB()]);
+    StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f%@ mem=%.0fMB",
+                   idx, vis, cv.contentOffset.x, geo, FootprintMB()]);
+
+    // Correccion de prueba: si poco despues la celda enfocada sigue fuera de pantalla, forzar el scroll.
+    if (isCell) {
+        __weak UICollectionView *wcv = cv;
+        __weak UIView *wnext = next;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UICollectionView *c = wcv; UIView *cell = wnext;
+            if (!c || !cell || !cell.window) return;
+            CGRect visible = CGRectMake(c.contentOffset.x, c.contentOffset.y, c.bounds.size.width, c.bounds.size.height);
+            if (CGRectContainsRect(visible, cell.frame)) return;
+            CGFloat before = c.contentOffset.x;
+            [c scrollRectToVisible:CGRectInset(cell.frame, -120, 0) animated:NO];
+            StremioFixLog([NSString stringWithFormat:@"FIX off %.0f -> %.0f cs=%.0f", before, c.contentOffset.x, c.contentSize.width]);
+        });
+    }
 }
 
 static void Install(void) {

@@ -6,8 +6,44 @@
 
 static UIWindow *gHUDWin;
 static UILabel *gHUD;
+static UILabel *gBeat;
+static __weak UICollectionView *gCV;
+static unsigned long gTick;
 static NSMutableArray<NSString *> *gLines;
 static volatile CFAbsoluteTime gLastPong;
+
+static dispatch_queue_t gFileQ;
+static NSString *gLogPath;
+static UILabel *gPrev;
+static NSString *gPrevText;
+
+static void FileLog(NSString *line) {
+    if (!gFileQ || !gLogPath) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSString *row = [NSString stringWithFormat:@"%.2f %@\n", fmod(now, 10000), line];
+    dispatch_sync(gFileQ, ^{
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+        if (!h) { [@"" writeToFile:gLogPath atomically:NO encoding:NSUTF8StringEncoding error:nil]; h = [NSFileHandle fileHandleForWritingAtPath:gLogPath]; }
+        [h seekToEndOfFile];
+        [h writeData:[row dataUsingEncoding:NSUTF8StringEncoding]];
+        [h synchronizeFile];
+        [h closeFile];
+    });
+}
+
+static void SetupFileLog(void) {
+    gFileQ = dispatch_queue_create("stremiofix.file", DISPATCH_QUEUE_SERIAL);
+    NSString *dir = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    gLogPath = [dir stringByAppendingPathComponent:@"focusdiag.log"];
+    NSString *prev = [NSString stringWithContentsOfFile:gLogPath encoding:NSUTF8StringEncoding error:nil];
+    if (prev.length) {
+        NSArray *rows = [prev componentsSeparatedByString:@"\n"];
+        NSUInteger from = rows.count > 22 ? rows.count - 22 : 0;
+        gPrevText = [@"EJECUCION ANTERIOR (ultimas lineas):\n" stringByAppendingString:
+                     [[rows subarrayWithRange:NSMakeRange(from, rows.count - from)] componentsJoinedByString:@"\n"]];
+    }
+    [[NSFileManager defaultManager] removeItemAtPath:gLogPath error:nil];
+}
 
 static double FootprintMB(void) {
     task_vm_info_data_t info;
@@ -18,6 +54,7 @@ static double FootprintMB(void) {
 }
 
 static void StremioFixLog(NSString *line) {
+    FileLog(line);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!gLines) gLines = [NSMutableArray array];
         [gLines addObject:line];
@@ -43,12 +80,43 @@ static void InstallHUD(void) {
     gHUDWin.rootViewController = vc;
     gHUD = [[UILabel alloc] initWithFrame:CGRectMake(40, 40, 1840, 380)];
     gHUD.numberOfLines = 0;
-    gHUD.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightRegular];
+    gHUD.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v3 activo";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v4 activo (log en archivo)";
     [vc.view addSubview:gHUD];
+    gBeat = [[UILabel alloc] initWithFrame:CGRectMake(40, 8, 1840, 28)];
+    gBeat.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightBold];
+    gBeat.textColor = UIColor.cyanColor;
+    gBeat.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    [vc.view addSubview:gBeat];
+    if (gPrevText) {
+        gPrev = [[UILabel alloc] initWithFrame:CGRectMake(40, 430, 1840, 560)];
+        gPrev.numberOfLines = 0;
+        gPrev.font = [UIFont monospacedSystemFontOfSize:15 weight:UIFontWeightRegular];
+        gPrev.textColor = UIColor.orangeColor;
+        gPrev.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+        gPrev.text = gPrevText;
+        [vc.view addSubview:gPrev];
+    }
     gHUDWin.hidden = NO;
+    // Latido: si el contador deja de avanzar, el hilo principal esta bloqueado.
+    NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) {
+        UICollectionView *cv = gCV;
+        NSString *focus = @"-";
+        if (cv) {
+            id<UIFocusItem> it = [UIFocusSystem focusSystemForEnvironment:cv].focusedItem;
+            if ([it isKindOfClass:UICollectionViewCell.class]) {
+                NSIndexPath *ip = [cv indexPathForCell:(UICollectionViewCell *)it];
+                focus = [NSString stringWithFormat:@"cell %ld", (long)ip.item];
+            } else focus = it ? NSStringFromClass([(id)it class]) : @"nil";
+        }
+        gBeat.text = [NSString stringWithFormat:@"tick=%lu sysfocus=%@ off=%.0f drag=%d decel=%d anim=%d",
+                      ++gTick, focus, cv.contentOffset.x, cv.isDragging, cv.isDecelerating,
+                      (int)cv.layer.animationKeys.count];
+        if (gTick % 4 == 0) FileLog(gBeat.text);
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
 }
 
 static void StartWatchdog(void) {
@@ -62,6 +130,8 @@ static void StartWatchdog(void) {
                 gLastPong = CFAbsoluteTimeGetCurrent();
             });
             [NSThread sleepForTimeInterval:0.5];
+            CFAbsoluteTime lag = CFAbsoluteTimeGetCurrent() - gLastPong;
+            if (lag > 2.0) FileLog([NSString stringWithFormat:@"MAIN BLOQUEADO %.1fs", lag]);
         }
     });
 }
@@ -87,6 +157,7 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
     gOrigFocus(self, _cmd, ctx, coord);
     UIView *next = ctx.nextFocusedView;
     UICollectionView *cv = FindCollectionView(next);
+    if (cv) gCV = cv;
     NSString *idx = @"-", *vis = @"-", *geo = @"";
     BOOL isCell = [next isKindOfClass:UICollectionViewCell.class] && cv;
     if (isCell) {
@@ -96,9 +167,9 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
         vis = CGRectIntersectsRect(visible, next.frame) ? @"vis" : @"FUERA";
         geo = [NSString stringWithFormat:@" cs=%.0f fr=%.0f+%.0f bw=%.0f n=%ld %@",
                cv.contentSize.width, next.frame.origin.x, next.frame.size.width, cv.bounds.size.width,
-               (long)[cv numberOfItemsInSection:0], NSStringFromClass(cv.collectionViewLayout.class)];
+               (long)[cv numberOfItemsInSection:0], [NSStringFromClass(cv.collectionViewLayout.class) stringByReplacingOccurrencesOfString:@"Stremio." withString:@""]];
     }
-    StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f%@ mem=%.0fMB",
+    StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f%@ m=%.0f",
                    idx, vis, cv.contentOffset.x, geo, FootprintMB()]);
 
     // Correccion de prueba: si poco despues la celda enfocada sigue fuera de pantalla, forzar el scroll.
@@ -127,6 +198,7 @@ static void Install(void) {
 }
 
 __attribute__((constructor)) static void StremioFocusDiagInit(void) {
+    SetupFileLog();
     Observe(UIApplicationDidReceiveMemoryWarningNotification);
     Observe(UIApplicationWillResignActiveNotification);
     Observe(UIApplicationDidEnterBackgroundNotification);

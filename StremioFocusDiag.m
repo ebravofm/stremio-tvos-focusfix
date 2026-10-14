@@ -4,6 +4,11 @@
 #import <objc/runtime.h>
 #import <mach/mach.h>
 
+// 1 = el layout deja de calcular su propio destino de scroll y se usa el del sistema.
+#ifndef BYPASS_CUSTOM_TARGET
+#define BYPASS_CUSTOM_TARGET 1
+#endif
+
 static UIWindow *gHUDWin;
 static UILabel *gHUD;
 static UILabel *gBeat;
@@ -83,7 +88,7 @@ static void InstallHUD(void) {
     gHUD.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v4 activo (log en archivo)";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v5 activo (log en archivo)";
     [vc.view addSubview:gHUD];
     gBeat = [[UILabel alloc] initWithFrame:CGRectMake(40, 8, 1840, 28)];
     gBeat.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightBold];
@@ -188,13 +193,32 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
     }
 }
 
+typedef CGPoint (*TCOIMP)(id, SEL, CGPoint, CGPoint);
+static TCOIMP gOrigTCO;
+static CFAbsoluteTime gLastTCOLog;
+
+static CGPoint HookedTCO(id self, SEL _cmd, CGPoint proposed, CGPoint velocity) {
+    CGPoint orig = gOrigTCO(self, _cmd, proposed, velocity);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (fabs(orig.x - proposed.x) > 1.0 && now - gLastTCOLog > 0.2) {
+        gLastTCOLog = now;
+        StremioFixLog([NSString stringWithFormat:@"tco prop=%.0f orig=%.0f %@", proposed.x, orig.x,
+                       BYPASS_CUSTOM_TARGET ? @"-> uso prop" : @"-> uso orig"]);
+    }
+    return BYPASS_CUSTOM_TARGET ? proposed : orig;
+}
+
 static void Install(void) {
     Class c = NSClassFromString(@"_TtC7Stremio25CatalogGridViewController");
     if (!c) { StremioFixLog(@"clase CatalogGridViewController NO encontrada"); return; }
     Method m = class_getInstanceMethod(c, @selector(didUpdateFocusInContext:withAnimationCoordinator:));
     if (!m) { StremioFixLog(@"metodo didUpdateFocus NO encontrado"); return; }
     gOrigFocus = (FocusIMP)method_setImplementation(m, (IMP)HookedDidUpdateFocus);
-    StremioFixLog([NSString stringWithFormat:@"hook instalado mem=%.0fMB", FootprintMB()]);
+    Class lay = NSClassFromString(@"_TtC7Stremio24LeadingAlignedFlowLayout");
+    Method lm = lay ? class_getInstanceMethod(lay, @selector(targetContentOffsetForProposedContentOffset:withScrollingVelocity:)) : NULL;
+    if (lm) gOrigTCO = (TCOIMP)method_setImplementation(lm, (IMP)HookedTCO);
+    StremioFixLog([NSString stringWithFormat:@"hook foco ok, hook layout %@ bypass=%d mem=%.0fMB",
+                   lm ? @"ok" : @"NO ENCONTRADO", BYPASS_CUSTOM_TARGET, FootprintMB()]);
 }
 
 __attribute__((constructor)) static void StremioFocusDiagInit(void) {

@@ -121,7 +121,7 @@ static void InstallHUD(void) {
                 focus = [NSString stringWithFormat:@"cell %ld", (long)ip.item];
             } else focus = it ? NSStringFromClass([(id)it class]) : @"nil";
         }
-        gBeat.text = [NSString stringWithFormat:@"tick=%lu sysfocus=%@ off=%.0f drag=%d decel=%d anim=%d",
+        gBeat.text = [NSString stringWithFormat:@"[v7] tick=%lu sysfocus=%@ off=%.0f drag=%d decel=%d anim=%d",
                       ++gTick, focus, cv.contentOffset.x, cv.isDragging, cv.isDecelerating,
                       (int)cv.layer.animationKeys.count];
         if (gTick % 4 == 0) FileLog(gBeat.text);

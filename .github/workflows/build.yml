@@ -11,7 +11,7 @@ jobs:
         run: |
           SDK=$(xcrun --sdk appletvos --show-sdk-path)
           xcrun clang -dynamiclib -arch arm64 -isysroot "$SDK" -mtvos-version-min=15.0 \
-            -fobjc-arc -framework UIKit -framework Foundation \
+            -fobjc-arc -framework UIKit -framework Foundation -framework CoreGraphics \
             -install_name @rpath/StremioFocusDiag.dylib \
             -o StremioFocusDiag.dylib StremioFocusDiag.m
           file StremioFocusDiag.dylib

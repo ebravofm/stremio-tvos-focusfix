@@ -19,6 +19,20 @@ static UILabel *gHUD;
 static UILabel *gBeat;
 static __weak UICollectionView *gCV;
 static unsigned long gTick;
+static int gFrames;
+static double gWorstGap;
+static CFTimeInterval gLastFrame;
+@interface FPSProbe : NSObject
+- (void)frame:(CADisplayLink *)l;
+@end
+@implementation FPSProbe
+- (void)frame:(CADisplayLink *)l {
+    CFTimeInterval t = l.timestamp;
+    if (gLastFrame > 0 && (t - gLastFrame) > gWorstGap) gWorstGap = t - gLastFrame;
+    gLastFrame = t;
+    gFrames++;
+}
+@end
 static NSMutableArray<NSString *> *gLines;
 static volatile CFAbsoluteTime gLastPong;
 
@@ -93,7 +107,7 @@ static void InstallHUD(void) {
     gHUD.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular];
     gHUD.textColor = UIColor.yellowColor;
     gHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v7 activo (log en archivo)";
+    gHUD.text = gLines.count ? [gLines componentsJoinedByString:@"\n"] : @"StremioFocusDiag v8 activo (log en archivo)";
     [vc.view addSubview:gHUD];
     gBeat = [[UILabel alloc] initWithFrame:CGRectMake(40, 8, 1840, 28)];
     gBeat.font = [UIFont monospacedSystemFontOfSize:18 weight:UIFontWeightBold];
@@ -111,6 +125,10 @@ static void InstallHUD(void) {
     }
     gHUDWin.hidden = NO;
     // Latido: si el contador deja de avanzar, el hilo principal esta bloqueado.
+    static FPSProbe *probe;
+    probe = [FPSProbe new];
+    CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:probe selector:@selector(frame:)];
+    [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) {
         UICollectionView *cv = gCV;
         NSString *focus = @"-";
@@ -121,9 +139,14 @@ static void InstallHUD(void) {
                 focus = [NSString stringWithFormat:@"cell %ld", (long)ip.item];
             } else focus = it ? NSStringFromClass([(id)it class]) : @"nil";
         }
-        gBeat.text = [NSString stringWithFormat:@"[v7] tick=%lu sysfocus=%@ off=%.0f drag=%d decel=%d anim=%d",
-                      ++gTick, focus, cv.contentOffset.x, cv.isDragging, cv.isDecelerating,
-                      (int)cv.layer.animationKeys.count];
+        static int lastFrames; static CFAbsoluteTime lastT;
+        CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
+        double fps = lastT ? (gFrames - lastFrames) / (nowT - lastT) : 0;
+        static double shownGap;
+        if (gTick % 4 == 0) { shownGap = gWorstGap; gWorstGap = 0; }
+        lastFrames = gFrames; lastT = nowT;
+        gBeat.text = [NSString stringWithFormat:@"[v8] tick=%lu sysfocus=%@ off=%.0f fps=%.0f gap=%.0fms dec=%d",
+                      ++gTick, focus, cv.contentOffset.x, fps, shownGap * 1000, cv.isDecelerating];
         if (gTick % 4 == 0) FileLog(gBeat.text);
         if (cv) {
             static NSString *lastGeo;
@@ -172,7 +195,9 @@ typedef void (*FocusIMP)(id, SEL, UIFocusUpdateContext *, UIFocusAnimationCoordi
 static FocusIMP gOrigFocus;
 
 static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, UIFocusAnimationCoordinator *coord) {
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
     gOrigFocus(self, _cmd, ctx, coord);
+    double dtms = (CFAbsoluteTimeGetCurrent() - t0) * 1000;
     UIView *next = ctx.nextFocusedView;
     UICollectionView *cv = FindCollectionView(next);
     if (cv) gCV = cv;
@@ -183,13 +208,11 @@ static void HookedDidUpdateFocus(id self, SEL _cmd, UIFocusUpdateContext *ctx, U
         idx = ip ? [NSString stringWithFormat:@"%ld", (long)ip.item] : @"nil";
         CGRect visible = CGRectMake(cv.contentOffset.x, cv.contentOffset.y, cv.bounds.size.width, cv.bounds.size.height);
         vis = CGRectIntersectsRect(visible, next.frame) ? @"vis" : @"FUERA";
-        geo = [NSString stringWithFormat:@" cs=%.0f fr=%.0f bw=%.0f cvf=%@ ins=%@",
-               cv.contentSize.width, next.frame.origin.x, cv.bounds.size.width,
-               NSStringFromCGRect([cv convertRect:cv.bounds toView:nil]),
-               NSStringFromUIEdgeInsets(cv.adjustedContentInset)];
+        geo = [NSString stringWithFormat:@" fr=%.0f",
+               next.frame.origin.x];
     }
-    StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f%@ m=%.0f",
-                   idx, vis, cv.contentOffset.x, geo, FootprintMB()]);
+    StremioFixLog([NSString stringWithFormat:@"foco i=%@ %@ off=%.0f dt=%.0fms%@ m=%.0f",
+                   idx, vis, cv.contentOffset.x, dtms, geo, FootprintMB()]);
 
     // Correccion de prueba: si poco despues la celda enfocada sigue fuera de pantalla, forzar el scroll.
     if (ENABLE_FIX && isCell) {
